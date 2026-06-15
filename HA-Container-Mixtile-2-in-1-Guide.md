@@ -635,6 +635,7 @@ Z-Wave JS UI: http://<Ubuntu主机IP>:8091
 
 - 自动检测 Mixtile 硬件和串口路径
 - 安装 Docker / Docker Compose
+- 可选启用 Docker 开机自启（断电/重启后自动恢复容器，默认开启）
 - 生成 docker-compose.yml 和 settings.json
 - 启动容器并等待就绪
 - 通过 REST API 完成 HA Onboarding（创建用户、配置时区）

@@ -337,6 +337,13 @@ phase2_config() {
         HA_PASSWORD_GENERATED=false
     fi
 
+    # -- Boot auto-start --
+    if confirm "开机自启动（断电/重启后自动恢复 Docker 与 HA 容器）[Y/n]:" "Y"; then
+        ENABLE_BOOT_START=true
+    else
+        ENABLE_BOOT_START=false
+    fi
+
     # -- Z-Wave/Zigbee serial ports --
     if [ -z "$ZWAVE_PORT" ]; then
         read -r -p "Z-Wave 串口路径: " ZWAVE_PORT </dev/tty
@@ -358,6 +365,11 @@ phase2_config() {
     fi
     echo -e "  Z-Wave:   ${BOLD}$ZWAVE_PORT${NC}"
     echo -e "  Zigbee:   ${BOLD}$ZIGBEE_PORT${NC}"
+    if [ "$ENABLE_BOOT_START" = true ]; then
+        echo -e "  开机自启: ${BOLD}是${NC}（Docker 守护进程；容器随其自动恢复）"
+    else
+        echo -e "  开机自启: ${BOLD}否${NC}"
+    fi
     echo ""
 
     if ! confirm "确认开始部署？[Y/n]:" "Y"; then
@@ -398,6 +410,41 @@ phase3_prepare() {
             warn "非 apt 系统，请手动安装 docker-compose-plugin"
         fi
         success "docker-compose-plugin 安装完成"
+    fi
+
+    # -- Ensure python3 (phase7 onboarding depends on it for JSON handling) --
+    if check_command python3; then
+        info "python3: $(python3 --version 2>&1)"
+    else
+        info "python3 未安装，正在安装..."
+        if check_command apt-get; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3 || die "python3 安装失败（phase7 onboarding 依赖它）"
+        else
+            die "未找到 python3 且非 apt 系统，请手动安装 python3 后重试"
+        fi
+        success "python3 已安装"
+    fi
+
+    # -- Enable Docker boot auto-start --
+    if [ "${ENABLE_BOOT_START:-true}" = true ]; then
+        if check_command systemctl; then
+            info "启用 Docker 开机自启..."
+            local sc_out
+            if sc_out="$(sudo systemctl enable --now docker 2>&1)"; then
+                success "Docker 已设为开机自启（容器将随守护进程自动恢复）"
+            else
+                warn "无法启用 Docker 开机自启"
+                detail "失败原因: ${sc_out:-未知}"
+                detail "请手动执行: sudo systemctl enable --now docker"
+            fi
+        else
+            warn "systemctl 不可用，跳过开机自启设置（该系统可能未使用 systemd）"
+            detail "如需开机自启，请参考对应 init 系统的手动配置"
+        fi
+    else
+        info "未启用开机自启"
+        detail "如需启用: sudo systemctl enable --now docker"
     fi
 
     # -- Add user to groups --
@@ -722,10 +769,13 @@ user_step=[s for s in steps if s['step']=='user']
 sys.exit(0 if user_step and not user_step[0]['done'] else 1)
 " 2>/dev/null; then
         info "创建管理员用户: $HA_USER"
+        # Build JSON via python3 to safely escape special chars in password/username
+        local user_payload
+        user_payload="$(python3 -c 'import json,sys; print(json.dumps({"language":"zh-Hans","client_id":sys.argv[1],"name":sys.argv[2],"username":sys.argv[2],"password":sys.argv[3]}))' "$CLIENT_ID" "$HA_USER" "$HA_PASSWORD" 2>/dev/null || true)"
         local user_response
         user_response=$(curl -sS -X POST "$HA_BASE/api/onboarding/users" \
             -H "Content-Type: application/json" \
-            -d "{\"language\": \"zh-Hans\", \"client_id\": \"$CLIENT_ID\", \"name\": \"$HA_USER\", \"username\": \"$HA_USER\", \"password\": \"$HA_PASSWORD\"}" 2>/dev/null || true)
+            -d "$user_payload" 2>/dev/null || true)
 
         local AUTH_CODE
         AUTH_CODE=$(echo "$user_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auth_code',''))" 2>/dev/null || true)
@@ -783,10 +833,12 @@ sys.exit(0 if user_step and not user_step[0]['done'] else 1)
 
     # ---- Step 2: Core config ----
     info "配置核心设置 (时区: $TZ)..."
+    local core_payload
+    core_payload="$(python3 -c 'import json,sys; print(json.dumps({"language":"zh-Hans","location":{"name":"Home"},"time_zone":sys.argv[1],"unit_system":"metric","currency":"CNY"}))' "$TZ" 2>/dev/null || true)"
     curl -sS -X POST "$HA_BASE/api/onboarding/core_config" \
         -H "$AUTH_HEADER" \
         -H "Content-Type: application/json" \
-        -d "{\"language\": \"zh-Hans\", \"location\": {\"name\": \"Home\"}, \"time_zone\": \"$TZ\", \"unit_system\": \"metric\", \"currency\": \"CNY\"}" 2>/dev/null || warn "核心配置有警告"
+        -d "$core_payload" 2>/dev/null || warn "核心配置有警告"
     success "核心设置已配置"
 
     # ---- Step 3: Analytics ----
@@ -812,11 +864,11 @@ sys.exit(0 if user_step and not user_step[0]['done'] else 1)
 
     # ---- Step 5: Add ZHA integration ----
     info "添加 ZHA 集成..."
-    add_zha_integration "$AUTH_HEADER" "$HA_BASE"
+    add_zha_integration "$AUTH_HEADER" "$HA_BASE" || warn "ZHA 自动添加未成功，请通过 Web UI 手动添加"
 
     # ---- Step 6: Add Z-Wave JS integration ----
     info "添加 Z-Wave JS 集成..."
-    add_zwave_integration "$AUTH_HEADER" "$HA_BASE"
+    add_zwave_integration "$AUTH_HEADER" "$HA_BASE" || warn "Z-Wave 自动添加未成功，请通过 Web UI 手动添加"
 }
 
 # ---- ZHA Integration (3-step config flow via API) ----
@@ -1011,6 +1063,29 @@ phase8_verify() {
         success "Zigbee 容器串口: /dev/ttyACM1 ✓"
     else
         warn "Zigbee 容器串口映射可能有问题"
+    fi
+
+    # ---- Boot auto-start ----
+    echo ""
+    echo -e "${BOLD}--- 开机自启 ---${NC}"
+    if check_command systemctl; then
+        local docker_autostart
+        docker_autostart="$(systemctl is-enabled docker 2>/dev/null || echo unknown)"
+        case "$docker_autostart" in
+            enabled)
+                success "Docker 守护进程: 已开机自启 (enabled) ✓"
+                ;;
+            disabled|masked)
+                warn "Docker 守护进程: 未开机自启 ($docker_autostart)"
+                detail "如需启用: sudo systemctl enable --now docker"
+                ;;
+            *)
+                info "Docker 守护进程自启状态: $docker_autostart"
+                ;;
+        esac
+        success "容器重启策略: restart: unless-stopped（守护进程启动后容器自动恢复）"
+    else
+        warn "systemctl 不可用，无法检测开机自启状态"
     fi
 
     # ---- Integration check (if we have auth) ----
