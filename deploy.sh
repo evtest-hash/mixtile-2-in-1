@@ -544,7 +544,7 @@ services:
   zwave-js-ui:
     image: zwavejs/zwave-js-ui:latest
     container_name: zwave-js-ui
-    restart: unless-stopped
+    restart: always
     tty: true
     stop_signal: SIGINT
     environment:
@@ -562,7 +562,7 @@ services:
   homeassistant:
     image: ghcr.io/home-assistant/home-assistant:stable
     container_name: homeassistant
-    restart: unless-stopped
+    restart: always
     privileged: true
     network_mode: host
     environment:
@@ -1083,7 +1083,7 @@ phase8_verify() {
                 info "Docker 守护进程自启状态: $docker_autostart"
                 ;;
         esac
-        success "容器重启策略: restart: unless-stopped（守护进程启动后容器自动恢复）"
+        success "容器重启策略: restart: always（守护进程启动后容器自动恢复）"
     else
         warn "systemctl 不可用，无法检测开机自启状态"
     fi
